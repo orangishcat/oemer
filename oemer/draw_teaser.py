@@ -15,7 +15,7 @@ out: ndarray
 
 def draw_bbox(
     bboxes: List[BBox], 
-    color: Tuple[int, int, int], 
+    color: Tuple[int, int, int],
     text: Optional[str] = None, 
     labels: Optional[List[str]] = None, 
     text_y_pos: float = 1
@@ -28,6 +28,8 @@ def draw_bbox(
         elif labels is not None:
             cv2.putText(out, labels[idx], (x2+2, y_pos), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1)
 
+def get_deskewed():
+    return Image.fromarray(layers.get_layer('original_image'))
 
 def teaser() -> Image.Image:
     ori_img = layers.get_layer('original_image')

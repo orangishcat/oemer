@@ -1,3 +1,4 @@
-from oemer import ete
+from oemer.ete import main
 
-ete.main()
+if __name__ == '__main__':
+    main()

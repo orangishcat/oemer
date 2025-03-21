@@ -462,7 +462,7 @@ class AddNote(Action):
         self.voice = voice
 
     def perform(self, parent_elem: Optional[Element] = None) -> Element:
-        clef_type = self.ctx.clefs[self.note.track].label  # type: ignore
+        clef_type = self.ctx.clefs[self.note.track].label
         chroma = get_chroma_pitch(self.note.staff_line_pos, clef_type)
         cur_sfn = self.ctx.sfn_state[chroma]
         if (self.note.sfn is not None) and (cur_sfn != self.note.sfn):

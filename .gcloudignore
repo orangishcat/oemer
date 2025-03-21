@@ -1,0 +1,17 @@
+# Ignore git metadata
+.git/
+.gitignore
+
+.venv/
+.github/
+.idea/
+figures/
+docs/
+audio/
+
+# Python cache files
+__pycache__/
+*.pyc
+
+# Environment files
+.env

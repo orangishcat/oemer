@@ -1,10 +1,10 @@
+import argparse
 import os
 import pickle
-import argparse
 import urllib.request
+from argparse import Namespace, ArgumentParser
 from pathlib import Path
 from typing import Tuple
-from argparse import Namespace, ArgumentParser
 
 from PIL import Image
 from numpy import ndarray
@@ -25,11 +25,9 @@ from oemer.note_group_extraction import extract as group_extract
 from oemer.symbol_extraction import extract as symbol_extract
 from oemer.rhythm_extraction import extract as rhythm_extract
 from oemer.build_system import MusicXMLBuilder
-from oemer.draw_teaser import teaser
-
+from oemer.draw_teaser import teaser, get_deskewed
 
 logger = get_logger(__name__)
-
 
 CHECKPOINTS_URL = {
     "1st_model.onnx": "https://github.com/BreezeWhite/oemer/releases/download/checkpoints/1st_model.onnx",
@@ -37,7 +35,6 @@ CHECKPOINTS_URL = {
     "2nd_model.onnx": "https://github.com/BreezeWhite/oemer/releases/download/checkpoints/2nd_model.onnx",
     "2nd_weights.h5": "https://github.com/BreezeWhite/oemer/releases/download/checkpoints/2nd_weights.h5"
 }
-
 
 
 def clear_data() -> None:
@@ -53,8 +50,8 @@ def generate_pred(img_path: str, use_tf: bool = False) -> Tuple[ndarray, ndarray
         img_path,
         use_tf=use_tf,
     )
-    staff = np.where(staff_symbols_map==1, 1, 0)
-    symbols = np.where(staff_symbols_map==2, 1, 0)
+    staff = np.where(staff_symbols_map == 1, 1, 0)
+    symbols = np.where(staff_symbols_map == 2, 1, 0)
 
     logger.info("Extracting layers of different symbols")
     symbol_thresholds = [0.5, 0.4, 0.4]
@@ -64,9 +61,9 @@ def generate_pred(img_path: str, use_tf: bool = False) -> Tuple[ndarray, ndarray
         manual_th=None,
         use_tf=use_tf,
     )
-    stems_rests = np.where(sep==1, 1, 0)
-    notehead = np.where(sep==2, 1, 0)
-    clefs_keys = np.where(sep==3, 1, 0)
+    stems_rests = np.where(sep == 1, 1, 0)
+    notehead = np.where(sep == 2, 1, 0)
+    clefs_keys = np.where(sep == 3, 1, 0)
     # stems_rests = sep[..., 0]
     # notehead = sep[..., 1]
     # clefs_keys = sep[..., 2]
@@ -83,7 +80,7 @@ def polish_symbols(rgb_black_th=300):
     arr = np.where(arr < rgb_black_th, 1, 0)  # Filter background
     ker = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 3))
     arr = cv2.dilate(cv2.erode(arr.astype(np.uint8), ker), ker)  # Filter staff lines
-    mix = np.where(sym_pred+arr>1, 1, 0)
+    mix = np.where(sym_pred + arr > 1, 1, 0)
     return mix
 
 
@@ -91,7 +88,7 @@ def register_notehead_bbox(bboxes):
     symbols = layers.get_layer('symbols_pred')
     layer = layers.get_layer('bboxes')
     for (x1, y1, x2, y2) in bboxes:
-        yi, xi = np.where(symbols[y1:y2, x1:x2]>0)
+        yi, xi = np.where(symbols[y1:y2, x1:x2] > 0)
         yi += y1
         xi += x1
         layer[yi, xi] = np.array([x1, y1, x2, y2])
@@ -104,7 +101,7 @@ def register_note_id() -> None:
     notes = layers.get_layer('notes')
     for idx, note in enumerate(notes):
         x1, y1, x2, y2 = note.bbox
-        yi, xi = np.where(symbols[y1:y2, x1:x2]>0)
+        yi, xi = np.where(symbols[y1:y2, x1:x2] > 0)
         yi += y1
         xi += x1
         layer[yi, xi] = idx
@@ -115,6 +112,8 @@ def extract(args: Namespace) -> str:
     img_path = Path(args.img_path)
     f_name = os.path.splitext(img_path.name)[0]
     pkl_path = img_path.parent / f"{f_name}.pkl"
+    os.environ["min_pixels"] = str(args.min_pixels)
+    os.environ["max_pixels"] = str(args.max_pixels)
     if pkl_path.exists():
         # Load from cache
         pred = pickle.load(open(pkl_path, "rb"))
@@ -165,7 +164,7 @@ def extract(args: Namespace) -> str:
 
     # Register predictions
     symbols = symbols + clefs_keys + stems_rests
-    symbols[symbols>1] = 1
+    symbols[symbols > 1] = 1
     layers.register_layer("stems_rests_pred", stems_rests)
     layers.register_layer("clefs_keys_pred", clefs_keys)
     layers.register_layer("notehead_pred", notehead)
@@ -187,7 +186,7 @@ def extract(args: Namespace) -> str:
     layers.register_layer('notes', np.array(notes))
 
     # Add a new layer (w * h), indicating note id of each pixel.
-    layers.register_layer('note_id', np.zeros(symbols.shape, dtype=np.int64)-1)
+    layers.register_layer('note_id', np.zeros(symbols.shape, dtype=np.int64) - 1)
     register_note_id()
 
     # ---- Extract groups of note ---- #
@@ -219,7 +218,7 @@ def extract(args: Namespace) -> str:
     out_path = args.output_path
     if not out_path.endswith(".musicxml"):
         # Take the output path as the folder.
-        out_path = os.path.join(out_path, basename+".musicxml")
+        out_path = os.path.join(out_path, basename + ".musicxml")
 
     with open(out_path, "wb") as ff:
         ff.write(xml)
@@ -242,6 +241,18 @@ def get_parser() -> ArgumentParser:
         help="Save the model predictions and the next time won't need to predict again.",
         action='store_true')
     parser.add_argument(
+        "-min-pixels",
+        help="Minimum number of pixels to resize the image.",
+        type=int,
+        default=3_000_000
+    )
+    parser.add_argument(
+        "-max-pixels",
+        help="Maximum number of pixels to resize the image.",
+        type=int,
+        default=4_350_000
+    )
+    parser.add_argument(
         "-d",
         "--without-deskew",
         help="Disable the deskewing step if you are sure the image has no skew.",
@@ -253,16 +264,15 @@ def download_file(title: str, url: str, save_path: str) -> None:
     resp = urllib.request.urlopen(url)
     length = int(resp.getheader("Content-Length", -1))
 
-    chunk_size = 2**9
+    chunk_size = 2 ** 9
     total = 0
     with open(save_path, "wb") as out:
         while True:
-            print(f"{title}: {total*100/length:.1f}% {total}/{length}", end="\r")
             data = resp.read(chunk_size)
             if not data:
                 break
             total += out.write(data)
-        print(f"{title}: 100% {length}/{length}"+" "*20)
+        print(f"{title}: 100% {length}/{length}" + " " * 20)
 
 
 def main() -> None:
@@ -277,7 +287,7 @@ def main() -> None:
     if not os.path.exists(chk_path):
         logger.warn("No checkpoint found in %s", chk_path)
         for idx, (title, url) in enumerate(CHECKPOINTS_URL.items()):
-            logger.info(f"Downloading checkpoints ({idx+1}/{len(CHECKPOINTS_URL)})")
+            logger.info(f"Downloading checkpoints ({idx + 1}/{len(CHECKPOINTS_URL)})")
             save_dir = "unet_big" if title.startswith("1st") else "seg_net"
             save_dir = os.path.join(MODULE_PATH, "checkpoints", save_dir)
             save_path = os.path.join(save_dir, title.split("_")[1])
@@ -285,8 +295,8 @@ def main() -> None:
 
     clear_data()
     mxl_path = extract(args)
-    img = teaser()
-    img.save(mxl_path.replace(".musicxml", "_teaser.png"))
+    get_deskewed().save(mxl_path.replace(".musicxml", "_deskewed.png"))
+    teaser().save(mxl_path.replace(".musicxml", "_teaser.png"))
 
 
 if __name__ == "__main__":
