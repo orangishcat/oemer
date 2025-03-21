@@ -72,7 +72,7 @@ def predict_bboxes(img_path: str, deskew: bool):
 
     score = converter.parse(xml.decode())
     notes_info = []
-    note_bboxes = [n.bbox for n in notes if not n.invalid]
+    note_bboxes = [list(n.bbox) for n in notes if not n.invalid]
     note_index = 0
     for note in score.flatten().notes:
         for pitch in note.pitches:
