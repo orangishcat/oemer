@@ -16,10 +16,12 @@ def resize_image(image: Image.Image):
     # Best number would be 3M~4.35M pixels.
     w, h = image.size
     pis = w * h
-    if 3000000 <= pis <= 435000:
+    min_pixels = int(os.environ["min_pixels"])
+    max_pixels = int(os.environ["max_pixels"])
+    if min_pixels <= pis <= max_pixels:
         return image
-    lb = 3000000 / pis
-    ub = 4350000 / pis
+    lb = min_pixels / pis
+    ub = max_pixels / pis
     ratio = pow((lb + ub) / 2, 0.5)
     tar_w = round(ratio * w)
     tar_h = round(ratio * h)
