@@ -11,8 +11,8 @@ class Predictor(BasePredictor):
     def predict(
         self,
         image: Path = Input(description="Input image"),
-        min_pixels: int = Input(description="Minimum pixel size", default=750_000),
-        max_pixels: int = Input(description="Maximum pixel size", default=1_250_000),
+        min_pixels: int = Input(description="Minimum pixel size", default=1_250_000),
+        max_pixels: int = Input(description="Maximum pixel size", default=1_750_000),
         deskew: bool = Input(description="Whether to deskew the image", default=False),
     ) -> Path:
         """Run a single prediction on the model"""

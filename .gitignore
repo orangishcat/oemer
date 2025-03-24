@@ -7,6 +7,7 @@ build/
 dist/
 oemer.egg-info/
 checkpoints/
+.idea/
 
 .DS_Store
 
