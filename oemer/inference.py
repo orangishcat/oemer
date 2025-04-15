@@ -16,8 +16,8 @@ def resize_image(image: Image.Image):
     # Best number would be 3M~4.35M pixels.
     w, h = image.size
     pis = w * h
-    min_pixels = int(os.environ["min_pixels"])
-    max_pixels = int(os.environ["max_pixels"])
+    min_pixels = int(os.environ.get("min_pixels", 3_000_000))
+    max_pixels = int(os.environ.get("max_pixels", 4_350_000))
     if min_pixels <= pis <= max_pixels:
         return image
     lb = min_pixels / pis
