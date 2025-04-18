@@ -37,86 +37,104 @@ def note_events() -> List[Dict[str, Any]]:
     voices = get_voices()
     group_container = sort_symbols(voices)
 
-    # build measures…
-    measures, num = [], 1
+    # Build measures (same as MusicXMLBuilder.gen_measures)
+    measures = []
+    num = 1
     for grp, insts in group_container.items():
-        buf, at_beg, dbl = [], True, False
+        buffer, at_beginning, dbl = [], True, False
         for inst in insts:
             if isinstance(inst, Barline):
-                if not buf:
+                if not buffer:
                     dbl = True
                 else:
-                    m = gen_measure(buf, grp, num, at_beg, dbl)
-                    measures.append(m)
+                    measures.append(gen_measure(buffer, grp, num, at_beginning, dbl))
                     num += 1
-                    buf, at_beg, dbl = [], False, False
+                    buffer, at_beginning, dbl = [], False, False
                 continue
-            buf.append(inst)
-        if buf:
-            measures.append(gen_measure(buf, grp, num, at_beg, dbl))
-    total_tracks = get_total_track_nums()
-    track_time = [0] * total_tracks
+            buffer.append(inst)
+        if buffer:
+            measures.append(gen_measure(buffer, grp, num, at_beginning, dbl))
 
-    # default clefs
+    total_tracks = get_total_track_nums()
+
+    # Continuous clef & accidental state across the entire page
     current_clefs = []
     for t in range(total_tracks):
-        c = Clef()
-        c.track = t
-        c.label = ClefType.G_CLEF
+        c = Clef(); c.track = t; c.label = ClefType.G_CLEF
         current_clefs.append(c)
 
-    events = []
+    # Initialize accidentals once from the first measure’s key
+    accidental_state = {L: None for L in "ABCDEFG"}
+    first_key = measures[0].get_key().value
+    if first_key > 0:
+        for L in SHARP_KEY_ORDER[:first_key]:
+            accidental_state[L] = SfnType.SHARP
+    elif first_key < 0:
+        for L in FLAT_KEY_ORDER[:abs(first_key)]:
+            accidental_state[L] = SfnType.FLAT
+
+    events: List[Dict[str, Any]] = []
+    measure_offset = 0  # cumulative time from all previous measures
+
     for m in measures:
-        # init accidental state from key
-        ks = m.get_key().value
-        acc_state = {L: None for L in "ABCDEFG"}
-        if ks > 0:
-            for L in SHARP_KEY_ORDER[:ks]:
-                acc_state[L] = SfnType.SHARP
-        elif ks < 0:
-            for L in FLAT_KEY_ORDER[:abs(ks)]:
-                acc_state[L] = SfnType.FLAT
+        # per-measure local time trackers
+        local_time = [0] * total_tracks
+        measure_events: List[Dict[str, Any]] = []
 
         for sym in m.symbols:
-            # handle clef change first
+            # 1) clef changes take effect immediately
             if isinstance(sym, Clef):
                 current_clefs[sym.track] = sym
                 continue
+            # 2) skip accidental symbols (we’re not resetting per measure)
             if isinstance(sym, Sfn):
                 continue
 
-            tr, dur = sym.track, get_duration(sym)
-            start = track_time[tr]
+            tr = sym.track
+            dur = get_duration(sym)
+            start_local = local_time[tr]
 
             if isinstance(sym, Rest):
-                track_time[tr] += dur
+                local_time[tr] += dur
                 continue
 
-            # Voice → note(s)
-            clef = current_clefs[tr].label
+            # 3) for notes (Voice), collect events with local start
+            clef_type = current_clefs[tr].label
             for nid in sym.note_ids:
                 n = notes_layer[nid]
-                # determine letter
-                letter = get_chroma_pitch(n.staff_line_pos, clef)
-                # pick explicit or inherited
+                letter = get_chroma_pitch(n.staff_line_pos, clef_type)
+
+                # explicit accidental? update; else inherit
                 if n.sfn is not None:
-                    acc_state[letter] = n.sfn
+                    accidental_state[letter] = n.sfn
                     acc = n.sfn
                 else:
-                    acc = acc_state[letter]
-                midi = note_pos_to_midi(int(n.staff_line_pos), acc, clef)
-                events.append({
+                    acc = accidental_state[letter]
+
+                midi = note_pos_to_midi(int(n.staff_line_pos), acc, clef_type)
+                measure_events.append({
                     "pitch": midi,
                     "duration": dur,
-                    "start_time": start,
                     "track": tr,
-                    "bbox": getattr(n, "bbox", None)
+                    "bbox": getattr(n, "bbox", None),
+                    "start_local": start_local
                 })
 
-            track_time[tr] += dur
+            # advance local time for this track
+            local_time[tr] += dur
+
+        # 4) compute how long this measure lasted (max across tracks)
+        measure_length = max(local_time)
+
+        # 5) finalize each event’s absolute start_time
+        for ev in measure_events:
+            ev["start_time"] = measure_offset + ev.pop("start_local")
+            events.append(ev)
+
+        # 6) bump the offset for the next measure
+        measure_offset += measure_length
 
     return events
-
 
 def predict_bboxes(img_path: str, deskew: bool):
     staff, symbols, stems_rests, notehead, clefs_keys = generate_pred(img_path)
