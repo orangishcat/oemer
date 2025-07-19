@@ -10,7 +10,7 @@ from oemer.symbol_extraction import extract as symbol_extract
 
 
 def note_pos_to_midi(pos: int, acc: Optional[SfnType], clef_type: ClefType) -> int:
-    """Compute MIDI number from staff position + accidental + clef."""
+    """Compute MIDI number from staff position + accidental and clef."""
     # choose mapping
     if clef_type == ClefType.G_CLEF:
         order, base_oct, pitch_off = G_CLEF_POS_TO_PITCH, 5, 1
@@ -32,6 +32,42 @@ def note_pos_to_midi(pos: int, acc: Optional[SfnType], clef_type: ClefType) -> i
     return semis
 
 
+def get_staff_by_track(track_num: int):
+    """Get the Staff object for a given track number."""
+    staffs = layers.get_layer('staffs')
+    staffs_flat = staffs.reshape(-1, 1).squeeze()
+    for staff in staffs_flat:
+        if staff.track == track_num:
+            return staff
+    return None
+
+
+def get_voice_position(track_num: int) -> str:
+    """Determine if the voice is top, bottom, middle, single, or unknown in its group."""
+    staffs = layers.get_layer('staffs')
+    staffs_flat = staffs.reshape(-1, 1).squeeze()
+
+    current_staff = get_staff_by_track(track_num)
+    if current_staff is None:
+        return "unknown"
+
+    # Get all staffs in the same group
+    group_staffs = [s for s in staffs_flat if s.group == current_staff.group]
+
+    if len(group_staffs) <= 1:
+        return "single"
+
+    # Sort by y_center (top to bottom)
+    group_staffs.sort(key=lambda s: s.y_center)
+
+    if current_staff.track == group_staffs[0].track:
+        return "top"
+    elif current_staff.track == group_staffs[-1].track:
+        return "bottom"
+    else:
+        return "middle"
+
+
 def note_events() -> List[Dict[str, Any]]:
     notes_layer = layers.get_layer('notes')
     voices = get_voices()
@@ -40,9 +76,9 @@ def note_events() -> List[Dict[str, Any]]:
     # Build measures (same as MusicXMLBuilder.gen_measures)
     measures = []
     num = 1
-    for grp, insts in group_container.items():
+    for grp, instances in group_container.items():
         buffer, at_beginning, dbl = [], True, False
-        for inst in insts:
+        for inst in instances:
             if isinstance(inst, Barline):
                 if not buffer:
                     dbl = True
@@ -57,7 +93,7 @@ def note_events() -> List[Dict[str, Any]]:
 
     total_tracks = get_total_track_nums()
 
-    # Continuous clef & accidental state across the entire page
+    # Continuous clef and accidental state across the entire page
     current_clefs = []
     for t in range(total_tracks):
         c = Clef(); c.track = t; c.label = ClefType.G_CLEF
@@ -75,6 +111,10 @@ def note_events() -> List[Dict[str, Any]]:
 
     events: List[Dict[str, Any]] = []
     measure_offset = 0  # cumulative time from all previous measures
+
+    # Cache for staff lookups and voice positions to avoid repeated calculations
+    staff_cache = {}
+    voice_position_cache = {}
 
     for m in measures:
         # per-measure local time trackers
@@ -100,6 +140,21 @@ def note_events() -> List[Dict[str, Any]]:
 
             # 3) for notes (Voice), collect events with local start
             clef_type = current_clefs[tr].label
+
+            # Get staff and voice position info (with caching)
+            if tr not in staff_cache:
+                staff_cache[tr] = get_staff_by_track(tr)
+            if tr not in voice_position_cache:
+                voice_position_cache[tr] = get_voice_position(tr)
+
+            staff = staff_cache[tr]
+            voice_position = voice_position_cache[tr]
+
+            # Create voice bbox from staff bounds
+            voice_bbox = None
+            if staff is not None:
+                voice_bbox = [staff.x_left, staff.y_upper, staff.x_right, staff.y_lower]
+
             for nid in sym.note_ids:
                 n = notes_layer[nid]
                 letter = get_chroma_pitch(n.staff_line_pos, clef_type)
@@ -117,6 +172,9 @@ def note_events() -> List[Dict[str, Any]]:
                     "duration": dur,
                     "track": tr,
                     "bbox": getattr(n, "bbox", None),
+                    "voice_bbox": voice_bbox,
+                    "clef": clef_type,
+                    "voice_position": voice_position,
                     "start_local": start_local
                 })
 
