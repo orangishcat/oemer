@@ -16,6 +16,8 @@ Able to transcribe on skewed and phone taken photos. The models were trained to 
 
 https://user-images.githubusercontent.com/24308057/136168551-2e705c2d-8cf5-4063-826f-0e179f54c772.mp4
 
+***SPECIAL MENTION*** of [homr](https://github.com/liebharc/homr), an awesome improved version of this project by [Christian Liebhardt](https://github.com/liebharc), which features a more dedicated and powerful deep learning model, offering greater robustness to image quality, and producing more pleasing final results.
+
 ## Quick Start
 ``` bash
 # Install from PyPi
