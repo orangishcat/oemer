@@ -1,3 +1,6 @@
+from collections import defaultdict
+
+from oemer.bbox import BBox
 from oemer.build_system import *
 from oemer.dewarp import estimate_coords, dewarp
 from oemer.ete import generate_pred
@@ -32,101 +35,57 @@ def note_pos_to_midi(pos: int, acc: Optional[SfnType], clef_type: ClefType) -> i
     return semis
 
 
-def get_staff_by_track(track_num: int):
-    """Get the Staff object for a given track number."""
-    staffs = layers.get_layer('staffs')
-    staffs_flat = staffs.reshape(-1, 1).squeeze()
-    for staff in staffs_flat:
-        if staff.track == track_num:
-            return staff
-    return None
-
-
-def get_voice_position(track_num: int) -> str:
-    """Determine if the voice is top, bottom, middle, single, or unknown in its group."""
-    staffs = layers.get_layer('staffs')
-    staffs_flat = staffs.reshape(-1, 1).squeeze()
-
-    current_staff = get_staff_by_track(track_num)
-    if current_staff is None:
-        return "unknown"
-
-    # Get all staffs in the same group
-    group_staffs = [s for s in staffs_flat if s.group == current_staff.group]
-
-    if len(group_staffs) <= 1:
-        return "single"
-
-    # Sort by y_center (top to bottom)
-    group_staffs.sort(key=lambda s: s.y_center)
-
-    if current_staff.track == group_staffs[0].track:
-        return "top"
-    elif current_staff.track == group_staffs[-1].track:
-        return "bottom"
-    else:
-        return "middle"
+def expand_bbox(b1: BBox, b2: BBox) -> BBox:
+    return min(b1[0], b2[0]), min(b1[1], b2[1]), max(b1[2], b2[2]), max(b1[3], b2[3])
 
 
 def get_voices_info() -> List[Dict[str, Any]]:
     """Get information about all voices including bbox, clef, and position."""
-    from oemer.utils import get_total_track_nums
 
-    total_tracks = get_total_track_nums()
-    voices_info = []
+    voice_info = defaultdict(lambda: {
+        "clef": "unknown",
+        "track": -1,
+        "group": -1,
+        "bbox": (100000, 100000, 0, 0)
+    })
 
-    # Get current clefs for each track
-    voices = get_voices()
-    group_container = sort_symbols(voices)
+    for clef in layers.get_layer("clefs"):
+        d = voice_info[clef.group * 2 + clef.track]
+        d["clef"] = "treble" if clef.label.name == "G_CLEF" else "bass"
+        d["track"] = clef.track
+        d["group"] = clef.group
+        d["bbox"] = expand_bbox(d["bbox"], clef.bbox)
 
-    # Build measures to get clef information
-    measures = []
-    num = 1
-    for grp, instances in group_container.items():
-        buffer, at_beginning, dbl = [], True, False
-        for inst in instances:
-            if isinstance(inst, Barline):
-                if not buffer:
-                    dbl = True
-                else:
-                    measures.append(gen_measure(buffer, grp, num, at_beginning, dbl))
-                    num += 1
-                    buffer, at_beginning, dbl = [], False, False
-                continue
-            buffer.append(inst)
-        if buffer:
-            measures.append(gen_measure(buffer, grp, num, at_beginning, dbl))
+    for barline in layers.get_layer("barlines"):
+        for track in range(2):
+            d = voice_info[barline.group * 2 + track]
+            bbox = barline.bbox.copy()
+            half_y = (bbox[3] - bbox[1]) * 0.6
+            if track == 0:
+                bbox[3] -= half_y
+            else:
+                bbox[1] += half_y
+            d["bbox"] = expand_bbox(d["bbox"], bbox)
 
-    # Initialize clefs
-    current_clefs = []
-    for t in range(total_tracks):
-        c = Clef(); c.track = t; c.label = ClefType.G_CLEF
-        current_clefs.append(c)
+    for note in layers.get_layer("notes"):
+        d = voice_info[note.group * 2 + note.track]
+        d["bbox"] = expand_bbox(d["bbox"], note.bbox)
 
-    # Update clefs from first measure
-    if measures:
-        for sym in measures[0].symbols:
-            if isinstance(sym, Clef):
-                current_clefs[sym.track] = sym
+    return sorted(voice_info.values(), key=lambda values: values["group"] * 2 + values["track"])
 
-    # Build voice info for each track
-    for track_num in range(total_tracks):
-        staff = get_staff_by_track(track_num)
-        voice_position = get_voice_position(track_num)
-        clef_type = current_clefs[track_num].label
 
-        voice_info = {
-            "bbox": None,
-            "clef": "treble" if clef_type == ClefType.G_CLEF else "bass",
-            "top": voice_position == "top"
-        }
-
-        if staff is not None:
-            voice_info["bbox"] = [staff.x_left, staff.y_upper, staff.x_right, staff.y_lower]
-
-        voices_info.append(voice_info)
-
-    return voices_info
+def get_line_info(voices_info):
+    line = defaultdict(lambda: {
+        "clefs": [],
+        "group": -1,
+        "bbox": (100000, 100000, 0, 0)
+    })
+    for voice in voices_info:
+        d = line[voice["group"]]
+        d["clefs"].append(voice["clef"])
+        d["group"] = voice["group"]
+        d["bbox"] = expand_bbox(d["bbox"], voice["bbox"])
+    return sorted(line.values(), key=lambda values: values["group"])
 
 
 def note_events() -> List[Dict[str, Any]]:
@@ -157,11 +116,13 @@ def note_events() -> List[Dict[str, Any]]:
     # Continuous clef and accidental state across the entire page
     current_clefs = []
     for t in range(total_tracks):
-        c = Clef(); c.track = t; c.label = ClefType.G_CLEF
+        c = Clef();
+        c.track = t;
+        c.label = ClefType.G_CLEF
         current_clefs.append(c)
 
     # Initialize accidentals once from the first measure’s key
-    accidental_state = {L: None for L in "ABCDEFG"}
+    accidental_state: dict[str, SfnType | None] = {L: None for L in "ABCDEFG"}
     first_key = measures[0].get_key().value
     if first_key > 0:
         for L in SHARP_KEY_ORDER[:first_key]:
@@ -233,6 +194,7 @@ def note_events() -> List[Dict[str, Any]]:
 
     return events
 
+
 def predict_bboxes(img_path: str, deskew: bool):
     staff, symbols, stems_rests, notehead, clefs_keys = generate_pred(img_path)
 
@@ -293,5 +255,6 @@ def predict_bboxes(img_path: str, deskew: bool):
     return {
         "size": [staff.shape[1], staff.shape[0]],
         "note_events": note_events(),
-        "voices": get_voices_info()
+        "voice_info": (voice_info := get_voices_info()),
+        "line_info": get_line_info(voice_info)
     }
