@@ -68,6 +68,67 @@ def get_voice_position(track_num: int) -> str:
         return "middle"
 
 
+def get_voices_info() -> List[Dict[str, Any]]:
+    """Get information about all voices including bbox, clef, and position."""
+    from oemer.utils import get_total_track_nums
+
+    total_tracks = get_total_track_nums()
+    voices_info = []
+
+    # Get current clefs for each track
+    voices = get_voices()
+    group_container = sort_symbols(voices)
+
+    # Build measures to get clef information
+    measures = []
+    num = 1
+    for grp, instances in group_container.items():
+        buffer, at_beginning, dbl = [], True, False
+        for inst in instances:
+            if isinstance(inst, Barline):
+                if not buffer:
+                    dbl = True
+                else:
+                    measures.append(gen_measure(buffer, grp, num, at_beginning, dbl))
+                    num += 1
+                    buffer, at_beginning, dbl = [], False, False
+                continue
+            buffer.append(inst)
+        if buffer:
+            measures.append(gen_measure(buffer, grp, num, at_beginning, dbl))
+
+    # Initialize clefs
+    current_clefs = []
+    for t in range(total_tracks):
+        c = Clef(); c.track = t; c.label = ClefType.G_CLEF
+        current_clefs.append(c)
+
+    # Update clefs from first measure
+    if measures:
+        for sym in measures[0].symbols:
+            if isinstance(sym, Clef):
+                current_clefs[sym.track] = sym
+
+    # Build voice info for each track
+    for track_num in range(total_tracks):
+        staff = get_staff_by_track(track_num)
+        voice_position = get_voice_position(track_num)
+        clef_type = current_clefs[track_num].label
+
+        voice_info = {
+            "bbox": None,
+            "clef": "treble" if clef_type == ClefType.G_CLEF else "bass",
+            "top": voice_position == "top"
+        }
+
+        if staff is not None:
+            voice_info["bbox"] = [staff.x_left, staff.y_upper, staff.x_right, staff.y_lower]
+
+        voices_info.append(voice_info)
+
+    return voices_info
+
+
 def note_events() -> List[Dict[str, Any]]:
     notes_layer = layers.get_layer('notes')
     voices = get_voices()
@@ -112,10 +173,6 @@ def note_events() -> List[Dict[str, Any]]:
     events: List[Dict[str, Any]] = []
     measure_offset = 0  # cumulative time from all previous measures
 
-    # Cache for staff lookups and voice positions to avoid repeated calculations
-    staff_cache = {}
-    voice_position_cache = {}
-
     for m in measures:
         # per-measure local time trackers
         local_time = [0] * total_tracks
@@ -140,21 +197,6 @@ def note_events() -> List[Dict[str, Any]]:
 
             # 3) for notes (Voice), collect events with local start
             clef_type = current_clefs[tr].label
-
-            # Get staff and voice position info (with caching)
-            if tr not in staff_cache:
-                staff_cache[tr] = get_staff_by_track(tr)
-            if tr not in voice_position_cache:
-                voice_position_cache[tr] = get_voice_position(tr)
-
-            staff = staff_cache[tr]
-            voice_position = voice_position_cache[tr]
-
-            # Create voice bbox from staff bounds
-            voice_bbox = None
-            if staff is not None:
-                voice_bbox = [staff.x_left, staff.y_upper, staff.x_right, staff.y_lower]
-
             for nid in sym.note_ids:
                 n = notes_layer[nid]
                 letter = get_chroma_pitch(n.staff_line_pos, clef_type)
@@ -172,9 +214,6 @@ def note_events() -> List[Dict[str, Any]]:
                     "duration": dur,
                     "track": tr,
                     "bbox": getattr(n, "bbox", None),
-                    "voice_bbox": voice_bbox,
-                    "clef": clef_type,
-                    "voice_position": voice_position,
                     "start_local": start_local
                 })
 
@@ -251,4 +290,8 @@ def predict_bboxes(img_path: str, deskew: bool):
     logger.info("Extracting rhythm types")
     rhythm_extract()
 
-    return {"size": [staff.shape[1], staff.shape[0]], "notes_info": note_events()}
+    return {
+        "size": [staff.shape[1], staff.shape[0]],
+        "note_events": note_events(),
+        "voices": get_voices_info()
+    }
