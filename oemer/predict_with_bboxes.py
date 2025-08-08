@@ -43,7 +43,7 @@ def get_voices_info() -> List[Dict[str, Any]]:
     """Get information about all voices including bbox, clef, and position."""
 
     voice_info = defaultdict(lambda: {
-        "clef": "unknown",
+        "clef": "UNKNOWN",
         "track": -1,
         "group": -1,
         "bbox": (100000, 100000, 0, 0)
