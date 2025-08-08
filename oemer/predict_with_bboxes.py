@@ -51,7 +51,7 @@ def get_voices_info() -> List[Dict[str, Any]]:
 
     for clef in layers.get_layer("clefs"):
         d = voice_info[clef.group * 2 + clef.track]
-        d["clef"] = "treble" if clef.label.name == "G_CLEF" else "bass"
+        d["clef"] = "TREBLE" if clef.label.name == "G_CLEF" else "BASS"
         d["track"] = clef.track
         d["group"] = clef.group
         d["bbox"] = expand_bbox(d["bbox"], clef.bbox)
@@ -116,8 +116,8 @@ def note_events() -> List[Dict[str, Any]]:
     # Continuous clef and accidental state across the entire page
     current_clefs = []
     for t in range(total_tracks):
-        c = Clef();
-        c.track = t;
+        c = Clef()
+        c.track = t
         c.label = ClefType.G_CLEF
         current_clefs.append(c)
 
@@ -254,7 +254,7 @@ def predict_bboxes(img_path: str, deskew: bool):
 
     return {
         "size": [staff.shape[1], staff.shape[0]],
-        "note_events": note_events(),
-        "voice_info": (voice_info := get_voices_info()),
-        "line_info": get_line_info(voice_info)
+        "notes": note_events(),
+        "voices": (voice_info := get_voices_info()),
+        "lines": get_line_info(voice_info)
     }
