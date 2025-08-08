@@ -36,7 +36,7 @@ def note_pos_to_midi(pos: int, acc: Optional[SfnType], clef_type: ClefType) -> i
 
 
 def expand_bbox(b1: BBox, b2: BBox) -> BBox:
-    return min(b1[0], b2[0]), min(b1[1], b2[1]), max(b1[2], b2[2]), max(b1[3], b2[3])
+    return int(min(b1[0], b2[0])), int(min(b1[1], b2[1])), int(max(b1[2], b2[2])), int(max(b1[3], b2[3]))
 
 
 def get_voices_info() -> List[Dict[str, Any]]:
@@ -174,7 +174,7 @@ def note_events() -> List[Dict[str, Any]]:
                     "pitch": midi,
                     "duration": dur,
                     "track": tr,
-                    "bbox": getattr(n, "bbox", None),
+                    "bbox": list(map(int, getattr(n, "bbox", None))),
                     "start_local": start_local
                 })
 
