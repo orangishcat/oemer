@@ -1,10 +1,31 @@
-from collections import defaultdict
+from typing import Any, Dict, List, Optional
 
+import math
+import numpy as np
+
+from oemer import layers
 from oemer.bbox import BBox
-from oemer.build_system import *
+from oemer.build_system import (
+    Barline,
+    Clef,
+    ClefType,
+    F_CLEF_POS_TO_PITCH,
+    FLAT_KEY_ORDER,
+    G_CLEF_POS_TO_PITCH,
+    SHARP_KEY_ORDER,
+    Sfn,
+    SfnType,
+    Rest,
+    gen_measure,
+    get_chroma_pitch,
+    get_duration,
+    get_total_track_nums,
+    get_voices,
+    sort_symbols,
+)
 from oemer.dewarp import estimate_coords, dewarp
-from oemer.ete import generate_pred
-from oemer.ete import register_note_id
+from oemer.ete import generate_pred, register_note_id
+from oemer.logger import get_logger
 from oemer.note_group_extraction import extract as group_extract
 from oemer.notehead_extraction import extract as note_extract
 from oemer.rhythm_extraction import extract as rhythm_extract
@@ -12,22 +33,26 @@ from oemer.staffline_extraction import extract as staff_extract
 from oemer.symbol_extraction import extract as symbol_extract
 
 
+logger = get_logger(__name__)
+
+INITIAL_BBOX: BBox = (100000, 100000, 0, 0)
+TRACKS_PER_GROUP = 2
+
+
 def note_pos_to_midi(pos: int, acc: Optional[SfnType], clef_type: ClefType) -> int:
     """Compute MIDI number from staff position + accidental and clef."""
-    # choose mapping
     if clef_type == ClefType.G_CLEF:
         order, base_oct, pitch_off = G_CLEF_POS_TO_PITCH, 5, 1
     else:
         order, base_oct, pitch_off = F_CLEF_POS_TO_PITCH, 3, 3
 
     step = order[pos % 7] if pos >= 0 else order[pos % -7]
-    # exact floor/ceil octave math
     if pos - pitch_off >= 0:
         octave = math.floor((pos + pitch_off) / 7) + base_oct
     else:
         octave = -math.ceil((pos + pitch_off) / -7) + base_oct
 
-    semis = {'C': 0, 'D': 2, 'E': 4, 'F': 5, 'G': 7, 'A': 9, 'B': 11}[step] + 12 * octave
+    semis = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}[step] + 12 * octave
     if acc == SfnType.SHARP:
         semis += 1
     elif acc == SfnType.FLAT:
@@ -36,161 +61,151 @@ def note_pos_to_midi(pos: int, acc: Optional[SfnType], clef_type: ClefType) -> i
 
 
 def expand_bbox(b1: BBox, b2: BBox) -> BBox:
-    return int(min(b1[0], b2[0])), int(min(b1[1], b2[1])), int(max(b1[2], b2[2])), int(max(b1[3], b2[3]))
+    return (
+        int(min(b1[0], b2[0])),
+        int(min(b1[1], b2[1])),
+        int(max(b1[2], b2[2])),
+        int(max(b1[3], b2[3])),
+    )
 
 
 def get_voices_info() -> List[Dict[str, Any]]:
     """Get information about all voices including bbox, clef, and position."""
 
-    voice_info = defaultdict(lambda: {
-        "clef": "UNKNOWN",
-        "track": -1,
-        "group": -1,
-        "bbox": (100000, 100000, 0, 0)
-    })
+    voice_info: Dict[int, Dict[str, Any]] = {}
+
+    def slot(group: int, track: int) -> Dict[str, Any]:
+        idx = group * TRACKS_PER_GROUP + track
+        if idx not in voice_info:
+            voice_info[idx] = {
+                "clef": "UNKNOWN",
+                "track": track,
+                "group": group,
+                "bbox": INITIAL_BBOX,
+            }
+        return voice_info[idx]
 
     for clef in layers.get_layer("clefs"):
-        d = voice_info[clef.group * 2 + clef.track]
-        d["clef"] = "TREBLE" if clef.label.name == "G_CLEF" else "BASS"
-        d["track"] = clef.track
-        d["group"] = clef.group
-        d["bbox"] = expand_bbox(d["bbox"], clef.bbox)
+        entry = slot(clef.group, clef.track)
+        entry["clef"] = "TREBLE" if clef.label == ClefType.G_CLEF else "BASS"
+        entry["bbox"] = expand_bbox(entry["bbox"], tuple(map(int, clef.bbox)))
 
     for barline in layers.get_layer("barlines"):
-        for track in range(2):
-            d = voice_info[barline.group * 2 + track]
-            bbox = barline.bbox.copy()
-            half_y = (bbox[3] - bbox[1]) * 0.6
-            if track == 0:
-                bbox[3] -= half_y
-            else:
-                bbox[1] += half_y
-            d["bbox"] = expand_bbox(d["bbox"], bbox)
+        bbox = tuple(map(int, barline.bbox))
+        half_y = int((bbox[3] - bbox[1]) * 0.6)
+        boxes = (
+            (bbox[0], bbox[1], bbox[2], bbox[3] - half_y),
+            (bbox[0], bbox[1] + half_y, bbox[2], bbox[3]),
+        )
+        for track, track_bbox in enumerate(boxes):
+            entry = slot(barline.group, track)
+            entry["bbox"] = expand_bbox(entry["bbox"], track_bbox)
 
     for note in layers.get_layer("notes"):
-        d = voice_info[note.group * 2 + note.track]
-        d["bbox"] = expand_bbox(d["bbox"], note.bbox)
+        entry = slot(note.group, note.track)
+        entry["bbox"] = expand_bbox(entry["bbox"], tuple(map(int, note.bbox)))
 
-    return sorted(voice_info.values(), key=lambda values: values["group"] * 2 + values["track"])
+    return [voice_info[key] for key in sorted(voice_info.keys())]
 
 
-def get_line_info(voices_info):
-    line = defaultdict(lambda: {
-        "clefs": [],
-        "group": -1,
-        "bbox": (100000, 100000, 0, 0)
-    })
+def get_line_info(voices_info: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    line_map: Dict[int, Dict[str, Any]] = {}
     for voice in voices_info:
-        d = line[voice["group"]]
-        d["clefs"].append(voice["clef"])
-        d["group"] = voice["group"]
-        d["bbox"] = expand_bbox(d["bbox"], voice["bbox"])
-    return sorted(line.values(), key=lambda values: values["group"])
+        group = voice["group"]
+        entry = line_map.setdefault(group, {"clefs": [], "group": group, "bbox": INITIAL_BBOX})
+        entry["clefs"].append(voice["clef"])
+        entry["bbox"] = expand_bbox(entry["bbox"], voice["bbox"])
+    return [line_map[key] for key in sorted(line_map.keys())]
 
 
 def note_events() -> List[Dict[str, Any]]:
-    notes_layer = layers.get_layer('notes')
+    notes_layer = layers.get_layer("notes")
     voices = get_voices()
     group_container = sort_symbols(voices)
 
-    # Build measures (same as MusicXMLBuilder.gen_measures)
-    measures = []
+    measures: List[Any] = []
     num = 1
     for grp, instances in group_container.items():
-        buffer, at_beginning, dbl = [], True, False
+        buffer: List[Any] = []
+        at_beginning, dbl = True, False
         for inst in instances:
             if isinstance(inst, Barline):
-                if not buffer:
-                    dbl = True
-                else:
+                if buffer:
                     measures.append(gen_measure(buffer, grp, num, at_beginning, dbl))
                     num += 1
                     buffer, at_beginning, dbl = [], False, False
+                else:
+                    dbl = True
                 continue
             buffer.append(inst)
         if buffer:
             measures.append(gen_measure(buffer, grp, num, at_beginning, dbl))
 
+    if not measures:
+        return []
+
     total_tracks = get_total_track_nums()
+    current_clefs: List[Clef] = []
+    for track_idx in range(total_tracks):
+        clef = Clef()
+        clef.track = track_idx
+        clef.label = ClefType.G_CLEF
+        current_clefs.append(clef)
 
-    # Continuous clef and accidental state across the entire page
-    current_clefs = []
-    for t in range(total_tracks):
-        c = Clef()
-        c.track = t
-        c.label = ClefType.G_CLEF
-        current_clefs.append(c)
-
-    # Initialize accidentals once from the first measure’s key
-    accidental_state: dict[str, SfnType | None] = {L: None for L in "ABCDEFG"}
+    accidental_state: Dict[str, Optional[SfnType]] = {letter: None for letter in "ABCDEFG"}
     first_key = measures[0].get_key().value
     if first_key > 0:
-        for L in SHARP_KEY_ORDER[:first_key]:
-            accidental_state[L] = SfnType.SHARP
+        for letter in SHARP_KEY_ORDER[:first_key]:
+            accidental_state[letter] = SfnType.SHARP
     elif first_key < 0:
-        for L in FLAT_KEY_ORDER[:abs(first_key)]:
-            accidental_state[L] = SfnType.FLAT
+        for letter in FLAT_KEY_ORDER[:abs(first_key)]:
+            accidental_state[letter] = SfnType.FLAT
 
     events: List[Dict[str, Any]] = []
-    measure_offset = 0  # cumulative time from all previous measures
+    measure_offset = 0
 
-    for m in measures:
-        # per-measure local time trackers
+    for measure in measures:
         local_time = [0] * total_tracks
-        measure_events: List[Dict[str, Any]] = []
 
-        for sym in m.symbols:
-            # 1) clef changes take effect immediately
+        for sym in measure.symbols:
             if isinstance(sym, Clef):
                 current_clefs[sym.track] = sym
                 continue
-            # 2) skip accidental symbols (we’re not resetting per measure)
             if isinstance(sym, Sfn):
                 continue
 
-            tr = sym.track
-            dur = get_duration(sym)
-            start_local = local_time[tr]
+            track = sym.track
+            duration = get_duration(sym)
+            start_local = local_time[track]
 
             if isinstance(sym, Rest):
-                local_time[tr] += dur
+                local_time[track] += duration
                 continue
 
-            # 3) for notes (Voice), collect events with local start
-            clef_type = current_clefs[tr].label
+            clef_type = current_clefs[track].label
             for nid in sym.note_ids:
-                n = notes_layer[nid]
-                letter = get_chroma_pitch(n.staff_line_pos, clef_type)
-
-                # explicit accidental? update; else inherit
-                if n.sfn is not None:
-                    accidental_state[letter] = n.sfn
-                    acc = n.sfn
+                note = notes_layer[nid]
+                letter = get_chroma_pitch(note.staff_line_pos, clef_type)
+                if note.sfn is not None:
+                    accidental_state[letter] = note.sfn
+                    acc = note.sfn
                 else:
                     acc = accidental_state[letter]
 
-                midi = note_pos_to_midi(int(n.staff_line_pos), acc, clef_type)
-                measure_events.append({
-                    "pitch": midi,
-                    "duration": dur,
-                    "track": tr,
-                    "bbox": list(map(int, getattr(n, "bbox", None))),
-                    "start_local": start_local
-                })
+                bbox = getattr(note, "bbox", None)
+                events.append(
+                    {
+                        "pitch": note_pos_to_midi(int(note.staff_line_pos), acc, clef_type),
+                        "duration": duration,
+                        "track": track,
+                        "bbox": list(map(int, bbox)) if bbox is not None else None,
+                        "start_time": measure_offset + start_local,
+                    }
+                )
 
-            # advance local time for this track
-            local_time[tr] += dur
+            local_time[track] += duration
 
-        # 4) compute how long this measure lasted (max across tracks)
-        measure_length = max(local_time)
-
-        # 5) finalize each event’s absolute start_time
-        for ev in measure_events:
-            ev["start_time"] = measure_offset + ev.pop("start_local")
-            events.append(ev)
-
-        # 6) bump the offset for the next measure
-        measure_offset += measure_length
+        measure_offset += max(local_time, default=0)
 
     return events
 
@@ -198,63 +213,64 @@ def note_events() -> List[Dict[str, Any]]:
 def predict_bboxes(img_path: str, deskew: bool):
     staff, symbols, stems_rests, notehead, clefs_keys = generate_pred(img_path)
 
+    preds = {
+        "staff": staff,
+        "symbols": symbols,
+        "stems_rests": stems_rests,
+        "notehead": notehead,
+        "clefs_keys": clefs_keys,
+    }
+
     if deskew:
         logger.info("Dewarping")
-        coords_x, coords_y = estimate_coords(staff)
-        staff = dewarp(staff, coords_x, coords_y)
-        symbols = dewarp(symbols, coords_x, coords_y)
-        stems_rests = dewarp(stems_rests, coords_x, coords_y)
-        clefs_keys = dewarp(clefs_keys, coords_x, coords_y)
-        notehead = dewarp(notehead, coords_x, coords_y)
+        coords_x, coords_y = estimate_coords(preds["staff"])
+        for key, layer in preds.items():
+            preds[key] = dewarp(layer, coords_x, coords_y)
 
-    layers._layers = {}
-    layers._access_count = {}
-    symbols = symbols + clefs_keys + stems_rests
-    symbols[symbols > 1] = 1
-    layers.register_layer("stems_rests_pred", stems_rests)
-    layers.register_layer("clefs_keys_pred", clefs_keys)
-    layers.register_layer("notehead_pred", notehead)
-    layers.register_layer("symbols_pred", symbols)
-    layers.register_layer("staff_pred", staff)
+    layers._layers.clear()
+    layers._access_count.clear()
 
-    # ---- Extract staff lines and group informations ---- #
+    layers.register_layer("stems_rests_pred", preds["stems_rests"])
+    layers.register_layer("clefs_keys_pred", preds["clefs_keys"])
+    layers.register_layer("notehead_pred", preds["notehead"])
+    merged_symbols = np.clip(
+        preds["symbols"] + preds["clefs_keys"] + preds["stems_rests"],
+        0,
+        1,
+    )
+    layers.register_layer("symbols_pred", merged_symbols)
+    layers.register_layer("staff_pred", preds["staff"])
+
     logger.info("Extracting stafflines")
     staffs, zones = staff_extract()
-    layers.register_layer("staffs", staffs)  # Array of 'Staff' instances
-    layers.register_layer("zones", zones)  # Range of each zones, array of 'range' object.
+    layers.register_layer("staffs", np.asarray(staffs))
+    layers.register_layer("zones", zones)
 
-    # ---- Extract noteheads ---- #
     logger.info("Extracting noteheads")
     notes = note_extract()
-
-    # Array of 'NoteHead' instances.
-    layers.register_layer('notes', np.array(notes))
-
-    # Add a new layer (w * h), indicating note id of each pixel.
-    layers.register_layer('note_id', np.zeros(symbols.shape, dtype=np.int64) - 1)
+    layers.register_layer("notes", np.asarray(notes))
+    layers.register_layer("note_id", np.full(merged_symbols.shape, -1, dtype=np.int64))
     register_note_id()
 
-    # ---- Extract groups of note ---- #
     logger.info("Grouping noteheads")
     groups, group_map = group_extract()
-    layers.register_layer('note_groups', np.array(groups))
-    layers.register_layer('group_map', group_map)
+    layers.register_layer("note_groups", np.asarray(groups))
+    layers.register_layer("group_map", group_map)
 
-    # ---- Extract symbols ---- #
     logger.info("Extracting symbols")
     barlines, clefs, sfns, rests = symbol_extract()
-    layers.register_layer('barlines', np.array(barlines))
-    layers.register_layer('clefs', np.array(clefs))
-    layers.register_layer('sfns', np.array(sfns))
-    layers.register_layer('rests', np.array(rests))
+    layers.register_layer("barlines", np.asarray(barlines))
+    layers.register_layer("clefs", np.asarray(clefs))
+    layers.register_layer("sfns", np.asarray(sfns))
+    layers.register_layer("rests", np.asarray(rests))
 
-    # ---- Parse rhythm ---- #
     logger.info("Extracting rhythm types")
     rhythm_extract()
 
+    voice_info = get_voices_info()
     return {
-        "size": [staff.shape[1], staff.shape[0]],
+        "size": [preds["staff"].shape[1], preds["staff"].shape[0]],
         "notes": note_events(),
-        "voices": (voice_info := get_voices_info()),
-        "lines": get_line_info(voice_info)
+        "voices": voice_info,
+        "lines": get_line_info(voice_info),
     }

@@ -296,7 +296,6 @@ class Measure:
             self.time_slots = time_slots
             self.slot_duras = track_duras
             return None
-        assert track_nums == 2, track_nums
 
         # Start adjusting rhythms
         diff = 0
@@ -530,7 +529,6 @@ class AddMeasure(Action):
 class AddInit(Action):
     def __init__(self, measure: Measure, **kwargs):
         super().__init__(**kwargs)
-        assert measure.at_beginning
         self.measure = measure
 
     def perform(self, parent_elem: Optional[Element] = None) -> Element:
@@ -779,7 +777,6 @@ def get_duration(sym: Union[Voice, Rest]) -> int:
     if isinstance(sym, Voice):
         return sym.duration
 
-    assert isinstance(sym, Rest), sym
     dura = REST_TYPE_TO_DURATION[sym.label]
     if sym.has_dot:
         dura = round(dura * 1.5)
@@ -829,7 +826,6 @@ def get_label_by_dura(duration, mapping):
     has_dot = False
     if min_diff > 0:
         dura = mapping[tar_label]
-        #assert dura // 2 == min_diff, f"{min_diff}, {duration}"
         has_dot = True
     return tar_label, has_dot
 
